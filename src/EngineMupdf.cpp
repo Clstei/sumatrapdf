@@ -2123,6 +2123,8 @@ bool EngineMupdf::LoadFromStream(fz_stream* stm, const char* nameHint, PasswordU
         dx = DpiScale(ldx, displayDPI);
         dy = DpiScale(ldy, displayDPI);
         fontDy = DpiScale(lfontDy, displayDPI);
+        layoutDx = dx;
+        layoutDy = dy;
         fz_layout_document(ctx, _doc, dx, dy, fontDy);
     }
     fz_always(ctx) {
@@ -2313,35 +2315,90 @@ static void FinishNonPDFLoading(EngineMupdf* e) {
     }
 }
 
+// set mediaboxes for pages in a chapter range [startPage, startPage+count) (0-based)
+// for epub/html all pages have the same layout dimensions, so we don't need to
+// load each page (which would cause epub HTML cache eviction and race conditions)
+static void SetChapterMediaboxes(EngineMupdf* e, int startPage, int count) {
+    RectF mbox(0, 0, e->layoutDx, e->layoutDy);
+    for (int i = 0; i < count; i++) {
+        int pageIdx = startPage + i;
+        FzPageInfo* pageInfo = e->pages.at(pageIdx);
+        pageInfo->mediabox = mbox;
+        pageInfo->pageNo = pageIdx + 1;
+    }
+}
+
 bool EngineMupdf::FinishLoading() {
     auto ctx = Ctx();
     pdfdoc = pdf_specifics(ctx, _doc);
 
-    pageCount = 0;
-    fz_var(pageCount);
-    fz_try(ctx) {
-        // this call might throw the first time
-        pageCount = fz_count_pages(ctx, _doc);
+    // check if this is a reflowable document with multiple chapters (epub/html)
+    bool isReflowable = fz_is_document_reflowable(ctx, _doc);
+    if (isReflowable && !pdfdoc) {
+        nChapters = 0;
+        fz_var(nChapters);
+        fz_try(ctx) {
+            nChapters = fz_count_chapters(ctx, _doc);
+        }
+        fz_catch(ctx) {
+            nChapters = 0;
+        }
+        if (nChapters > 1) {
+            lazyLoading = true;
+        }
     }
-    fz_catch(ctx) {
-        fz_report_error(ctx);
+
+    if (lazyLoading) {
+        // init chapter page counts as unknown (-1)
+        for (int i = 0; i < nChapters; i++) {
+            chapterPageCounts.Append(-1);
+        }
+
+        // layout only chapter 0 to get initial pages
+        EnsureChapterLoaded(0);
+        if (pageCount == 0) {
+            fz_warn(ctx, "document has no pages in first chapter");
+            return false;
+        }
+    } else {
         pageCount = 0;
-    }
-    if (pageCount == 0) {
-        fz_warn(ctx, "document has no pages");
-        return false;
+        fz_var(pageCount);
+        fz_try(ctx) {
+            // this call might throw the first time
+            pageCount = fz_count_pages(ctx, _doc);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            pageCount = 0;
+        }
+        if (pageCount == 0) {
+            fz_warn(ctx, "document has no pages");
+            return false;
+        }
+
+        for (int i = 0; i < pageCount; i++) {
+            auto pi = new FzPageInfo();
+            pages.Append(pi);
+        }
     }
 
     preferredLayout = GetPreferredLayout(ctx, _doc);
     allowsPrinting = fz_has_permission(ctx, _doc, FZ_PERMISSION_PRINT);
     allowsCopyingText = fz_has_permission(ctx, _doc, FZ_PERMISSION_COPY);
 
-    for (int i = 0; i < pageCount; i++) {
-        auto pi = new FzPageInfo();
-        pages.Append(pi);
-    }
     if (!pdfdoc) {
-        FinishNonPDFLoading(this);
+        if (!lazyLoading) {
+            FinishNonPDFLoading(this);
+        }
+        // load outline
+        ScopedCritSec scope(ctxAccess);
+        fz_try(ctx) {
+            outline = fz_load_outline(ctx, _doc);
+        }
+        fz_catch(ctx) {
+            fz_report_error(ctx);
+            fz_warn(ctx, "Couldn't load outline");
+        }
         return true;
     }
 
@@ -3002,13 +3059,15 @@ RenderedBitmap* EngineMupdf::RenderPage(RenderPageArgs& args) {
         fzcookie = (fz_cookie*)cookie->GetData();
     }
 
+    // hold ctxAccess for the entire operation: loading the page and rendering
+    // must be atomic to prevent epub HTML cache eviction between the two steps
+    ScopedCritSec cs(ctxAccess);
+
     FzPageInfo* pageInfo = GetFzPageInfo(pageNo, false, fzcookie);
     if (!pageInfo || !pageInfo->page) {
         return nullptr;
     }
     fz_page* page = pageInfo->page;
-
-    ScopedCritSec cs(ctxAccess);
 
     if (disableAntiAlias) {
         fz_set_aa_level(ctx, 0);
@@ -3271,12 +3330,14 @@ RenderedBitmap* EngineMupdf::GetPageImage(int pageNo, RectF rect, int imageIdx) 
 PageText EngineMupdf::ExtractPageText(int pageNo) {
     auto ctx = Ctx();
 
+    // hold ctxAccess for the entire operation: loading the page and extracting text
+    // must be atomic to prevent epub HTML cache eviction between the two steps
+    ScopedCritSec scope(ctxAccess);
+
     FzPageInfo* pageInfo = GetFzPageInfo(pageNo, true);
     if (!pageInfo) {
         return {};
     }
-
-    ScopedCritSec scope(ctxAccess);
 
     fz_stext_page* stext = nullptr;
     fz_var(stext);
@@ -3795,6 +3856,9 @@ int EngineMupdf::GetPageByLabel(const char* label) const {
 }
 
 int EngineMupdf::ChapterCount() const {
+    if (lazyLoading) {
+        return nChapters;
+    }
     auto ctx = _ctx;
     int nc = 0;
     fz_var(nc);
@@ -3808,6 +3872,18 @@ int EngineMupdf::ChapterCount() const {
 }
 
 int EngineMupdf::ChapterPageCount(int chapter) const {
+    if (lazyLoading) {
+        if (chapter < 0 || chapter >= nChapters) {
+            return 0;
+        }
+        int n = chapterPageCounts.at(chapter);
+        if (n == -1) {
+            // chapter not laid out yet — trigger layout
+            const_cast<EngineMupdf*>(this)->EnsureChapterLoaded(chapter);
+            n = chapterPageCounts.at(chapter);
+        }
+        return n < 0 ? 0 : n;
+    }
     auto ctx = _ctx;
     int np = 0;
     fz_var(np);
@@ -3821,6 +3897,29 @@ int EngineMupdf::ChapterPageCount(int chapter) const {
 }
 
 Location EngineMupdf::LocationFromPageNo(int pageNo) const {
+    if (lazyLoading) {
+        // compute from cached chapter page counts
+        int remaining = pageNo - 1; // convert to 0-based
+        for (int ch = 0; ch < nChapters; ch++) {
+            int n = chapterPageCounts.at(ch);
+            if (n == -1) {
+                // chapter not loaded — load it to get page count
+                const_cast<EngineMupdf*>(this)->EnsureChapterLoaded(ch);
+                n = chapterPageCounts.at(ch);
+                if (n < 0) {
+                    n = 0;
+                }
+            }
+            if (remaining < n) {
+                return Location(ch, remaining);
+            }
+            remaining -= n;
+        }
+        // past end — return last page of last chapter
+        int lastCh = nChapters - 1;
+        int lastN = chapterPageCounts.at(lastCh);
+        return Location(lastCh, lastN > 0 ? lastN - 1 : 0);
+    }
     auto ctx = _ctx;
     fz_location loc = {0, 0};
     fz_var(loc);
@@ -3835,6 +3934,23 @@ Location EngineMupdf::LocationFromPageNo(int pageNo) const {
 }
 
 int EngineMupdf::PageNoFromLocation(Location loc) const {
+    if (lazyLoading) {
+        // compute flat page number from cached chapter page counts
+        // ensure all chapters up to loc.chapter are loaded
+        int flatPage = 0;
+        for (int ch = 0; ch < loc.chapter && ch < nChapters; ch++) {
+            int n = chapterPageCounts.at(ch);
+            if (n == -1) {
+                const_cast<EngineMupdf*>(this)->EnsureChapterLoaded(ch);
+                n = chapterPageCounts.at(ch);
+                if (n < 0) {
+                    n = 0;
+                }
+            }
+            flatPage += n;
+        }
+        return flatPage + loc.page + 1; // convert to 1-based
+    }
     auto ctx = _ctx;
     fz_location fzloc;
     fzloc.chapter = loc.chapter;
@@ -3848,6 +3964,85 @@ int EngineMupdf::PageNoFromLocation(Location loc) const {
         pageNo = loc.page;
     }
     return pageNo + 1; // convert to 1-based
+}
+
+bool EngineMupdf::SupportsLazyChapterLayout() const {
+    return lazyLoading;
+}
+
+bool EngineMupdf::IsChapterLoaded(int chapter) const {
+    if (!lazyLoading) {
+        return true;
+    }
+    if (chapter < 0 || chapter >= nChapters) {
+        return false;
+    }
+    return chapterPageCounts.at(chapter) != -1;
+}
+
+void EngineMupdf::EnsureChapterLoaded(int chapter) {
+    if (!lazyLoading) {
+        return;
+    }
+    if (chapter < 0 || chapter >= nChapters) {
+        return;
+    }
+    if (chapterPageCounts.at(chapter) != -1) {
+        return; // already loaded
+    }
+
+    ScopedCritSec scope(ctxAccess);
+
+    // re-check after acquiring lock (another thread may have loaded it)
+    if (chapterPageCounts.at(chapter) != -1) {
+        return;
+    }
+
+    auto ctx = Ctx();
+    int np = 0;
+    fz_var(np);
+    fz_try(ctx) {
+        // this triggers layout of this chapter in mupdf
+        np = fz_count_chapter_pages(ctx, _doc, chapter);
+    }
+    fz_catch(ctx) {
+        fz_report_error(ctx);
+        np = 0;
+    }
+    chapterPageCounts[chapter] = np;
+
+    // compute flat page offset for this chapter's pages
+    int startPage = 0;
+    for (int i = 0; i < chapter; i++) {
+        int n = chapterPageCounts.at(i);
+        if (n > 0) {
+            startPage += n;
+        }
+    }
+
+    // create FzPageInfo entries for the new pages
+    // insert them at the right position
+    for (int i = 0; i < np; i++) {
+        auto pi = new FzPageInfo();
+        if (startPage + i < pages.Size()) {
+            // shouldn't happen for new chapters, but safety check
+        } else {
+            pages.Append(pi);
+        }
+    }
+
+    // update total page count
+    int total = 0;
+    for (int i = 0; i < nChapters; i++) {
+        int n = chapterPageCounts.at(i);
+        if (n > 0) {
+            total += n;
+        }
+    }
+    pageCount = total;
+
+    // load mediaboxes for the new chapter's pages
+    SetChapterMediaboxes(this, startPage, np);
 }
 
 bool IsEngineMupdfSupportedFileType(Kind kind) {

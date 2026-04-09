@@ -230,10 +230,14 @@ HWND NotificationWnd::Create(const NotificationCreateArgs& args) {
 
 // returns 0% - 100%
 int CalcPerc(int current, int total) {
-    ReportIf(total <= 0 || current < 0);
-    ReportIf(total < current);
     if (total <= 0) {
         total = 1;
+    }
+    if (current < 0) {
+        current = 0;
+    }
+    if (current > total) {
+        current = total;
     }
     int perc = limitValue(100 * current / total, 0, 100);
     return perc;

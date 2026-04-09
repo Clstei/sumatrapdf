@@ -45,14 +45,44 @@ DocumentTextCache::~DocumentTextCache() {
     DeleteCriticalSection(&access);
 }
 
+void DocumentTextCache::Grow(int newPageCount) {
+    ScopedCritSec scope(&access);
+    if (newPageCount <= nPages) {
+        return;
+    }
+    PageText* newPagesText = AllocArray<PageText>(newPageCount);
+    if (pagesText) {
+        memcpy(newPagesText, pagesText, nPages * sizeof(PageText));
+        free(pagesText);
+    }
+    pagesText = newPagesText;
+    nPages = newPageCount;
+}
+
 bool DocumentTextCache::HasTextForPage(int pageNo) const {
-    ReportIf(pageNo < 1 || pageNo > nPages);
+    ReportIf(pageNo < 1);
+    if (pageNo > nPages) {
+        // page is in a lazily-loaded chapter that grew pageCount after we were created
+        int newCount = engine->PageCount();
+        if (pageNo <= newCount) {
+            const_cast<DocumentTextCache*>(this)->Grow(newCount);
+        } else {
+            return false;
+        }
+    }
     PageText* pageText = &pagesText[pageNo - 1];
     return pageText->text != nullptr;
 }
 
 const WCHAR* DocumentTextCache::GetTextForPage(int pageNo, int* lenOut, Rect** coordsOut) {
-    ReportIf(pageNo < 1 || pageNo > nPages);
+    ReportIf(pageNo < 1);
+    if (pageNo > nPages) {
+        int newCount = engine->PageCount();
+        if (pageNo <= newCount) {
+            Grow(newCount);
+        }
+    }
+    ReportIf(pageNo > nPages);
 
     ScopedCritSec scope(&access);
     PageText* pageText = &pagesText[pageNo - 1];

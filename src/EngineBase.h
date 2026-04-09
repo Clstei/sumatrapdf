@@ -411,6 +411,13 @@ class EngineBase {
     virtual int PageNoFromLocation(Location loc) const { return loc.page + 1; }
     // true if document has more than one chapter (e.g. EPUB, HTML)
     bool HasMultipleChapters() const { return ChapterCount() > 1; }
+    // lazy chapter layout support
+    virtual bool SupportsLazyChapterLayout() const { return false; }
+    virtual bool IsChapterLoaded(int chapter) const {
+        (void)chapter;
+        return true;
+    }
+    virtual void EnsureChapterLoaded(int chapter) { (void)chapter; }
 
     // the box containing the visible page content (usually RectF(0, 0, pageWidth, pageHeight))
     virtual RectF PageMediabox(int pageNo) = 0;

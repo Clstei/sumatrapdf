@@ -3,6 +3,7 @@
 LIBRARY libmupdf
 EXPORTS
 	fz_location_from_page_number
+	fz_is_document_reflowable
 	fz_count_chapter_pages
 	ddjvu_page_get_initial_rotation
 	fz_open_document

@@ -427,6 +427,9 @@ PageInfo* DisplayModel::GetPageInfo(int pageNo) const {
         return nullptr;
     }
     ReportIf(!pagesInfo);
+    if (pageNo > pagesInfoCount) {
+        return nullptr;
+    }
     PageInfo* pi = &(pagesInfo[pageNo - 1]);
     return pi;
 }
@@ -472,6 +475,7 @@ void DisplayModel::BuildPagesInfo() {
     ReportIf(pagesInfo);
     int pageCount = PageCount();
     pagesInfo = AllocArray<PageInfo>(pageCount);
+    pagesInfoCount = pageCount;
     // +1 so we can index by pageNo (1-based)
     log("DisplayModel::BuildPagesInfo started\n");
     auto timeStart = TimeGet();
@@ -507,10 +511,35 @@ void DisplayModel::BuildPagesInfo() {
     // in non-continuous mode, GetPageInfo() will lazily load page sizes on demand
 }
 
+// grow the pagesInfo array when new chapters are loaded (lazy loading)
+void DisplayModel::GrowPagesInfo(int newPageCount) {
+    if (newPageCount <= pagesInfoCount) {
+        return;
+    }
+    PageInfo* newPagesInfo = AllocArray<PageInfo>(newPageCount);
+    if (pagesInfo) {
+        memcpy(newPagesInfo, pagesInfo, pagesInfoCount * sizeof(PageInfo));
+        // intentionally not freeing old pagesInfo: render threads may still hold
+        // pointers into it. the leak is small and bounded by the number of chapter loads.
+    }
+    pagesInfo = newPagesInfo;
+    // init new pages
+    bool isCont = IsContinuous(displayMode);
+    for (int i = pagesInfoCount; i < newPageCount; i++) {
+        pagesInfo[i].visibleRatio = 0.0;
+        pagesInfo[i].isShown = isCont;
+    }
+    pagesInfoCount = newPageCount;
+    // grow the text cache to match
+    if (textCache) {
+        textCache->Grow(newPageCount);
+    }
+}
+
 // TODO: a better name e.g. ShouldShow() to better distinguish between
 // before-layout info and after-layout visibility checks
 bool DisplayModel::PageShown(int pageNo) const {
-    if (!ValidPageNo(pageNo) || !pagesInfo) {
+    if (!ValidPageNo(pageNo) || !pagesInfo || pageNo > pagesInfoCount) {
         return false;
     }
     return pagesInfo[pageNo - 1].isShown;
@@ -676,6 +705,9 @@ int DisplayModel::CurrentPageNo() const {
 
     for (int pageNo = 1; pageNo <= PageCount(); pageNo++) {
         PageInfo* pageInfo = GetPageInfo(pageNo);
+        if (!pageInfo) {
+            break;
+        }
         if (pageInfo->visibleRatio > ratio) {
             mostVisiblePage = pageNo;
             ratio = pageInfo->visibleRatio;
@@ -747,6 +779,9 @@ float DisplayModel::GetZoomReal(int pageNo) const {
     DisplayMode mode = GetDisplayMode();
     if (IsContinuous(mode)) {
         PageInfo* pageInfo = GetPageInfo(pageNo);
+        if (!pageInfo) {
+            return zoomReal;
+        }
         return pageInfo->zoomReal;
     }
     if (IsSingle(mode)) {
@@ -981,7 +1016,7 @@ void DisplayModel::ChangeStartPage(int newStartPage) {
     if (IsBookView(GetDisplayMode()) && newStartPage == 1 && columns > 1) {
         newStartPage--;
     }
-    for (int pageNo = 1; pageNo <= PageCount(); pageNo++) {
+    for (int pageNo = 1; pageNo <= PageCount() && pageNo <= pagesInfoCount; pageNo++) {
         if (IsContinuous(GetDisplayMode())) {
             pagesInfo[pageNo - 1].isShown = true;
         } else if (pageNo >= newStartPage && pageNo < newStartPage + columns) {
@@ -1319,6 +1354,16 @@ Point DisplayModel::GetContentStart(int pageNo) const {
 
 // TODO: what's GoToPage supposed to do for Facing at 400% zoom?
 void DisplayModel::GoToPage(int pageNo, int scrollY, bool addNavPt, int scrollX) {
+    // for lazy chapter loading: ensure the target chapter is loaded
+    if (engine->SupportsLazyChapterLayout()) {
+        Location loc = engine->LocationFromPageNo(pageNo);
+        engine->EnsureChapterLoaded(loc.chapter);
+        int newPageCount = engine->PageCount();
+        if (newPageCount > pagesInfoCount) {
+            GrowPagesInfo(newPageCount);
+            Relayout(zoomVirtual, rotation);
+        }
+    }
     if (!ValidPageNo(pageNo)) {
         logf("DisplayModel::GoToPage: invalid pageNo: %d, nPages: %d\n", pageNo, engine->PageCount());
         ReportIf(true);
@@ -1486,6 +1531,23 @@ bool DisplayModel::GoToNextPage() {
     }
     int firstPageInNewRow = FirstPageInARowNo(currPageNo + columns, columns, IsBookView(GetDisplayMode()));
     if (firstPageInNewRow > PageCount()) {
+        // for lazy chapter loading, try loading the next chapter
+        if (engine->SupportsLazyChapterLayout()) {
+            Location loc = engine->LocationFromPageNo(currPageNo);
+            int nextChapter = loc.chapter + 1;
+            if (nextChapter < engine->ChapterCount()) {
+                engine->EnsureChapterLoaded(nextChapter);
+                int newPageCount = engine->PageCount();
+                if (newPageCount > pagesInfoCount) {
+                    GrowPagesInfo(newPageCount);
+                    Relayout(zoomVirtual, rotation);
+                }
+                if (firstPageInNewRow <= PageCount()) {
+                    GoToPage(firstPageInNewRow, false);
+                    return true;
+                }
+            }
+        }
         /* we're on a last row or after it, can't go any further */
         return false;
     }
@@ -2081,6 +2143,16 @@ void DisplayModel::ScrollToLink(IPageDestination* dest) {
 #endif
 
 void DisplayModel::ScrollTo(int pageNo, RectF rect, float zoom) {
+    // for lazy chapter loading: ensure the target chapter is loaded
+    if (engine->SupportsLazyChapterLayout()) {
+        Location loc = engine->LocationFromPageNo(pageNo);
+        engine->EnsureChapterLoaded(loc.chapter);
+        int newPageCount = engine->PageCount();
+        if (newPageCount > pagesInfoCount) {
+            GrowPagesInfo(newPageCount);
+            Relayout(zoomVirtual, rotation);
+        }
+    }
     Point scroll(-1, 0);
     // use per-page zoom which may differ from global zoomReal
     // when pages have varying sizes in fit-width/fit-page mode

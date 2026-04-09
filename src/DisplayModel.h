@@ -209,6 +209,7 @@ struct DisplayModel : DocController {
     bool InPresentation() const;
 
     void BuildPagesInfo();
+    void GrowPagesInfo(int newPageCount);
     float ZoomRealFromVirtualForPage(float zoomVirtual, int pageNo) const;
     SizeF PageSizeAfterRotation(int pageNo, bool fitToContent = false) const;
     void ChangeStartPage(int startPage);
@@ -224,8 +225,9 @@ struct DisplayModel : DocController {
 
     EngineBase* engine = nullptr;
 
-    /* an array of PageInfo, len of array is pageCount */
+    /* an array of PageInfo, len of array is pagesInfoCount */
     PageInfo* pagesInfo = nullptr;
+    int pagesInfoCount = 0;
 
     DisplayMode displayMode{DisplayMode::Automatic};
     /* In non-continuous mode is the first page from a file that we're

@@ -14,6 +14,7 @@ struct DocumentTextCache {
 
     bool HasTextForPage(int pageNo) const;
     const WCHAR* GetTextForPage(int pageNo, int* lenOut = nullptr, Rect** coordsOut = nullptr);
+    void Grow(int newPageCount);
 };
 
 // TODO: replace with Vec<TextSel>

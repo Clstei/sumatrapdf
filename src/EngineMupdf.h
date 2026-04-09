@@ -76,6 +76,10 @@ class EngineMupdf : public EngineBase {
     Location LocationFromPageNo(int pageNo) const override;
     int PageNoFromLocation(Location loc) const override;
 
+    bool SupportsLazyChapterLayout() const override;
+    bool IsChapterLoaded(int chapter) const override;
+    void EnsureChapterLoaded(int chapter) override;
+
     fz_context* Ctx() const;
 
     // make sure to never ask for pagesAccess in an ctxAccess
@@ -101,6 +105,13 @@ class EngineMupdf : public EngineBase {
     // used to track "dirty" state of annotations. not perfect because if we add and delete
     // the same annotation, we should be back to 0
     bool modifiedAnnotations = false;
+
+    // lazy chapter layout for epub/html
+    int nChapters = 0;
+    Vec<int> chapterPageCounts; // -1 = not yet laid out
+    bool lazyLoading = false;   // true if using lazy chapter layout
+    float layoutDx = 0;         // layout dimensions used for fz_layout_document
+    float layoutDy = 0;
 
     bool Load(const char* filePath, PasswordUI* pwdUI = nullptr);
     bool Load(IStream* stream, const char* nameHint, PasswordUI* pwdUI = nullptr);
