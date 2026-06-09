@@ -3,11 +3,15 @@
 
 class EngineBase;
 struct RenderedBitmap;
+struct RefLookupCache;
 
 struct RefHoverState {
     HWND hwndPopup = nullptr;
     // currently shown rendered destination strip (owned)
     RenderedBitmap* bmp = nullptr;
+
+    // cache of plain-text citation lookups (lazy-init on first use)
+    RefLookupCache* lookupCache = nullptr;
 
     // Pending hover request: set by RefHoverSchedule, consumed by
     // RefHoverOnTimer when the hover-delay timer fires.
@@ -104,3 +108,11 @@ bool RefHoverWheelZoom(RefHoverState* s, EngineBase* engine, int wheelDelta);
 // (continuous scrolling). Popup window keeps its initial size; only the
 // rendered region's Y (and possibly page number) changes.
 bool RefHoverWheelScroll(RefHoverState* s, EngineBase* engine, int wheelDelta);
+
+// Plain-text citation hover: when no link element is under the cursor, try
+// to detect a "(Surname et al., 2020)" / "Surname (2020)" pattern at pagePos
+// on srcPage, find the bibliography entry that matches, and return its
+// location. Returns true on success and fills destPage/destX/destY.
+// Lookups are cached on s.
+bool RefHoverTryPlainText(RefHoverState* s, EngineBase* engine, int srcPage, Point pagePos, int& destPageOut,
+                          float& destXOut, float& destYOut);

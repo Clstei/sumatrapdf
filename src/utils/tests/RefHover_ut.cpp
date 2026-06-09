@@ -361,6 +361,55 @@ static void LandscapeBoxBasicShape() {
     utassert(box.y + box.dy <= kPageH);
 }
 
+// (10) Plain-text citation "(Smith et al., 2020)": cursor on "Smith" yields
+// surname "Smith" and year 2020.
+static void PlainTextCitationDetected() {
+    WCHAR text[256];
+    Rect coords[256];
+    int len = 0;
+    AddText(text, coords, len, 256, L"as shown in (Smith et al., 2020) earlier", 72, 200);
+    char* surname = nullptr;
+    int year = 0;
+    // Cursor on the 'S' of "Smith" (glyph 13 → x = 72 + 13*6 = 150).
+    bool ok = DetectCitationInPageText(text, coords, len, Point{152, 206}, &surname, &year);
+    utassert(ok);
+    utassert(surname && str::Eq(surname, "Smith"));
+    utassert(year == 2020);
+    str::Free(surname);
+}
+
+// (11) No 4-digit year near the cursor: detection fails, no allocation.
+static void PlainTextCitationNoYear() {
+    WCHAR text[256];
+    Rect coords[256];
+    int len = 0;
+    AddText(text, coords, len, 256, L"plain body text without any citation", 72, 200);
+    char* surname = nullptr;
+    int year = 0;
+    bool ok = DetectCitationInPageText(text, coords, len, Point{100, 206}, &surname, &year);
+    utassert(!ok);
+    utassert(!surname);
+}
+
+// (12) Bibliography page lookup: a line starting with the surname and
+// containing the year anchors at the line's first glyph; a surname that is
+// not on the page returns false.
+static void SurnameFoundOnBibPage() {
+    WCHAR text[512];
+    Rect coords[512];
+    int len = 0;
+    AddText(text, coords, len, 512, L"References", 72, 100);
+    AddText(text, coords, len, 512, L"Smith, J. (2020). Some title.", 72, 130);
+    AddText(text, coords, len, 512, L"continuation of the entry.", 90, 145);
+    float x = 0.f, y = 0.f;
+    bool ok = FindSurnameInPageText(text, coords, len, L"Smith", 5, 2020, &x, &y);
+    utassert(ok);
+    utassert(x == 72.f);
+    utassert(y == 130.f);
+    ok = FindSurnameInPageText(text, coords, len, L"Jones", 5, 2021, &x, &y);
+    utassert(!ok);
+}
+
 void RefHoverTest() {
     AccentedAllCapsHeadingDetected();
     AuthorYearEntryFitsToOneEntry();
@@ -380,4 +429,7 @@ void RefHoverTest() {
     SparseTextReturnsWholePage();
     TwoColumnLeftEntryStaysInColumn();
     TwoColumnRightEntryStaysInColumn();
+    PlainTextCitationDetected();
+    PlainTextCitationNoYear();
+    SurnameFoundOnBibPage();
 }
