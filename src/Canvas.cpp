@@ -58,6 +58,7 @@
 #include "Translations.h"
 
 #include "RefHover.h"
+#include "RefHoverText.h"
 
 #include "utils/Log.h"
 
@@ -985,8 +986,8 @@ static void OnMouseMove(MainWindow* win, int x, int y, WPARAM) {
                             pageScreenRect.y = topLeft.y;
                         }
                         int delayMs = gGlobalPrefs->citationHoverDelay;
-                        RefHoverSchedule(win->refHover, win->hwndCanvas, delayMs, screenPt, destPage, destX, destY,
-                                         0.f, srcPageNo, RectF{}, pageScreenRect);
+                        RefHoverSchedule(win->refHover, win->hwndCanvas, delayMs, screenPt, destPage, destX, destY, 0.f,
+                                         srcPageNo, RectF{}, pageScreenRect);
                         scheduled = true;
                     }
                 }

@@ -8,6 +8,7 @@
 
 #include "utils/BaseUtil.h"
 #include "RefHoverDetect.h"
+#include "RefHoverTextDetect.h"
 
 // must be last due to assert() over-write
 #include "utils/UtAssert.h"
